@@ -217,7 +217,7 @@ class ActionExecutor:
         loop = asyncio.get_event_loop()
 
         def _scroll():
-            if x and y:
+            if x is not None and y is not None:
                 pyautogui.moveTo(x, y)
             pyautogui.scroll(clicks)
 
@@ -273,7 +273,10 @@ class ActionExecutor:
                     # Fallback: try os.startfile for registered apps
                     os.startfile(resolved)
             else:
-                subprocess.Popen([resolved])
+                cmd = [resolved]
+                if flags:
+                    cmd += flags.split()
+                subprocess.Popen(cmd)
 
         await loop.run_in_executor(None, _open)
         await asyncio.sleep(0.5)  # Let window appear
