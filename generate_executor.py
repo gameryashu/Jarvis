@@ -1,4 +1,6 @@
+import os
 
+code = """
 import asyncio
 import os
 import subprocess
@@ -22,7 +24,7 @@ def _log_action(tool: str, params: dict, success: bool, detail: str = "") -> Non
         status = "OK" if success else "FAIL"
         param_str = str(params)[:120]
         detail_str = (detail or "")[:200]
-        line = f"[{ts}] [{status}] tool={tool} params={param_str} detail={detail_str}\n"
+        line = f"[{ts}] [{status}] tool={tool} params={param_str} detail={detail_str}\\n"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(line)
     except Exception:
@@ -103,7 +105,7 @@ class ActionExecutor:
 
     async def _confirm(self, step: typing.Any) -> bool:
         try:
-            print(f"\n⚠️  CONFIRM: {getattr(step, 'description', '')}")
+            print(f"\\n⚠️  CONFIRM: {getattr(step, 'description', '')}")
             loop = asyncio.get_event_loop()
             answer = await loop.run_in_executor(None, input, "   Proceed? [y/N] ")
             return answer.strip().lower() in ("y", "yes")
@@ -377,8 +379,8 @@ class ActionExecutor:
 
     def _resolve_path(self, raw: str) -> pathlib.Path:
         p = raw.strip()
-        if p.startswith("~/Desktop") or p.startswith("~\\Desktop"):
-            rest = p[len("~/Desktop"):].lstrip("/\\")
+        if p.startswith("~/Desktop") or p.startswith("~\\\\Desktop"):
+            rest = p[len("~/Desktop"):].lstrip("/\\\\")
             base = pathlib.Path.home() / "Desktop"
             return base / rest if rest else base
         return pathlib.Path(p).expanduser()
@@ -413,7 +415,7 @@ class ActionExecutor:
             path_str = params.get("path", "")
             # Requirement: folder_name = params path split on / and \ take last part,
             # full_path = pathlib.Path.home()/"Desktop"/folder_name
-            parts = path_str.replace("\\", "/").split("/")
+            parts = path_str.replace("\\\\", "/").split("/")
             folder_name = parts[-1] if parts else ""
             if folder_name:
                 path = pathlib.Path.home() / "Desktop" / folder_name
@@ -433,7 +435,7 @@ class ActionExecutor:
     async def _tool_create_folder(self, params: dict) -> str:
         try:
             path_str = params.get("path", params.get("name", ""))
-            parts = path_str.replace("\\", "/").split("/")
+            parts = path_str.replace("\\\\", "/").split("/")
             folder_name = parts[-1] if parts else ""
             if folder_name:
                 path = pathlib.Path.home() / "Desktop" / folder_name
@@ -532,3 +534,7 @@ class ActionExecutor:
         except (asyncio.CancelledError, Exception) as e:
             raise RuntimeError(f"notify error: {e}") from e
 
+"""
+
+with open("core/executor.py", "w") as f:
+    f.write(code)
