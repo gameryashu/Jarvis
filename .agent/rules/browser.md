@@ -9,5 +9,3 @@ Common selectors:
 - YouTube search: input[name="search_query"]
 - Google search: input[name="q"]  
 - GitHub search: input[placeholder*="Search"]
-
-CRITICAL: For YouTube search ALWAYS use browser_search tool with engine='youtube'. NEVER use browser_type or browser_click for YouTube. The browser_search tool handles YouTube search internally.

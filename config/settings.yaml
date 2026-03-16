@@ -1,11 +1,64 @@
-llm_provider: openai
-llm_model: llama-3.3-70b-versatile
-llm_base_url: https://api.groq.com/openai/v1/
-stt_provider: whisper
-stt_model: base
+# JARVIS Configuration
+# Edit these values to customize your setup.
+# Environment variables (OPENAI_API_KEY, OPENAI_BASE_URL etc.) override these.
+
+# ── LLM Provider ───────────────────────────────────────────
+llm_provider: openai             # anthropic | openai | ollama
+llm_model: llama-3.3-70b-versatile  # Groq model (fast, free tier)
+# llm_base_url is set via OPENAI_BASE_URL env var in .bat files
+
+# ── Speech-to-Text ─────────────────────────────────────────
+stt_provider: whisper            # whisper (local) | google | deepgram
+stt_model: base                  # tiny | base | small | medium | large
+stt_language: en
+
+# ── Text-to-Speech ─────────────────────────────────────────
+tts_provider: edge-tts           # edge-tts | pyttsx3 | elevenlabs | gtts
+tts_rate: 175
+
+# ── Wake Word ──────────────────────────────────────────────
 require_wake_word: true
 wake_words:
   - hey jarvis
   - jarvis
-tts_provider: pyttsx3
-confirm_destructive: false
+
+# ── Voice / Audio ──────────────────────────────────────────
+voice_sample_rate: 16000
+voice_silence_threshold: 0.01
+voice_silence_duration: 1.5
+
+# ── Computer Control ───────────────────────────────────────
+mouse_move_duration: 0.3
+typing_interval: 0.04
+ocr_language: eng
+screenshot_interval: 1.0
+confirm_destructive: false       # Set true to prompt before destructive ops
+
+# ── Memory ─────────────────────────────────────────────────
+memory_dir: ~/.jarvis/memory
+memory_max_context_items: 20
+
+# ── Safety ─────────────────────────────────────────────────
+allowed_domains: []
+blocked_paths:
+  - /etc/passwd
+  - /etc/shadow
+  - ~/.ssh
+
+# ── Dashboard ──────────────────────────────────────────────
+dashboard_port: 7860
+dashboard_host: 127.0.0.1
+
+# ── Enabled Tools ──────────────────────────────────────────
+enabled_tools:
+  - mouse
+  - keyboard
+  - terminal
+  - browser
+  - files
+  - screenshot
+  - ocr
+  - search
+  - clipboard
+  - notifications
+  - media

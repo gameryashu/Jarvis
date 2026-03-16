@@ -5,6 +5,7 @@ Supports semantic search via sentence-transformers (optional).
 """
 
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -183,8 +186,8 @@ class MemoryManager:
                             interactions.append(Interaction(**data))
                         except Exception:
                             pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Could not load session history: %s", e)
         return interactions[-n:]
 
     def _load_projects(self) -> dict[str, Project]:
@@ -194,7 +197,8 @@ class MemoryManager:
             with open(self._projects_path, encoding="utf-8") as f:
                 data = json.load(f)
             return {k: Project(**v) for k, v in data.items()}
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not load projects: %s", e)
             return {}
 
     def _save_projects(self):
@@ -207,7 +211,8 @@ class MemoryManager:
         try:
             with open(self._prefs_path, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not load preferences: %s", e)
             return {}
 
     def _save_prefs(self):

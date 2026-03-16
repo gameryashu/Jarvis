@@ -2,9 +2,9 @@
 # Install with: pip install -r requirements.txt
 # Some packages require system-level dependencies (see README).
 
-# ── Core ──────────────────────────────────────────────────
-anthropic>=0.25.0          # LLM (Claude) — primary
-openai>=1.0.0              # LLM (GPT-4) — alternative
+# ── Core / LLM ────────────────────────────────────────────
+anthropic>=0.25.0          # LLM (Claude) — alternative
+openai>=1.0.0              # LLM (GPT-4 / Groq) — primary
 ollama>=0.1.0              # Local LLM via Ollama — alternative
 
 # ── Speech-to-Text ────────────────────────────────────────
@@ -14,10 +14,10 @@ pyaudio>=0.2.13            # Microphone capture (requires portaudio)
 # deepgram-sdk>=3.0.0      # Deepgram STT — optional
 
 # ── Text-to-Speech ────────────────────────────────────────
-pyttsx3>=2.90              # Local TTS (offline)
-gTTS>=2.3.0                # Google TTS (online)
-playsound>=1.3.0           # Audio playback
-# elevenlabs                # ElevenLabs TTS — optional
+edge-tts>=6.1.9            # Microsoft Edge TTS (online, free)
+playsound3>=1.0.0          # Audio playback (playsound3 is Python 3.11+ compatible)
+pyttsx3>=2.90              # Local TTS fallback (offline)
+gTTS>=2.3.0                # Google TTS alternative (online)
 
 # ── Computer Control ──────────────────────────────────────
 pyautogui>=0.9.54          # Mouse and keyboard automation
@@ -26,15 +26,21 @@ Pillow>=10.0.0             # Screenshot processing
 pytesseract>=0.3.10        # OCR (requires tesseract-ocr system package)
 plyer>=2.1.0               # Desktop notifications
 
+# ── Browser Automation ────────────────────────────────────
+playwright>=1.40.0         # Browser automation (run: playwright install chromium)
+
 # ── HTTP / Async ──────────────────────────────────────────
 aiohttp>=3.9.0             # Async HTTP (dashboard server)
 httpx>=0.25.0              # Async HTTP client (ElevenLabs etc.)
 
 # ── Memory / Embeddings ───────────────────────────────────
-sentence-transformers>=2.2.0  # Semantic search (optional, heavy)
 numpy>=1.24.0
 PyYAML>=6.0.1
 
 # ── Utilities ─────────────────────────────────────────────
 python-dotenv>=1.0.0       # .env file support
-rich>=13.0.0               # Better terminal output
+python-telegram-bot>=20.0  # Telegram bot interface
+
+# ── Optional heavy deps (comment in if needed) ───────────
+# sentence-transformers>=2.2.0  # Semantic search
+# rich>=13.0.0               # Better terminal output

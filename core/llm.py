@@ -1,16 +1,20 @@
 """
 core/llm.py — LLM reasoning and task planning.
 Converts natural language commands into structured, executable action plans.
-Supports Anthropic Claude, OpenAI GPT, and local Ollama models.
+Supports Anthropic Claude, OpenAI GPT (and Groq), and local Ollama models.
 """
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
 from config.settings import Settings
 from core.memory import MemoryManager
+
+logger = logging.getLogger(__name__)
 
 
 # ── Data Models ───────────────────────────────────────────────────────────────
@@ -49,14 +53,10 @@ class RecoveryAction:
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are JARVIS, an expert AI system controller.
-Your job is to translate a user's natural language command into a precise, executable action plan.
+SYSTEM_PROMPT = """You are JARVIS, an expert AI system controller running on Windows 11.
+User: yashu | Desktop: C:\\Users\\yashu\\Desktop | Default browser: Microsoft Edge
 
-IDENTITY:
-- JARVIS is running on Windows 11, user is Yatharth, laptop is HP Omen with RTX 4050
-- Default browser is Microsoft Edge (Chrome is NOT installed)
-- Desktop path is C:\\Users\\yashu\\Desktop
-- User is a 15-year-old programmer and gamer
+Your job is to translate a user's natural language command into a precise, executable action plan.
 
 You have access to these tools:
 - terminal: Run shell commands. params: {command: str}
@@ -65,105 +65,57 @@ You have access to these tools:
 - mouse_scroll: Scroll. params: {x: int, y: int, direction: "up"|"down", amount: int}
 - type_text: Type text. params: {text: str}
 - key_press: Press keyboard shortcuts. params: {keys: str} e.g. "ctrl+c"
-- open_app: Launch an application. params: {app: str, flags: str (optional)}
-  Supports optional flags for launch arguments.
-  Examples:
-    {"tool": "open_app", "params": {"app": "edge", "flags": "--inprivate"}}
+- open_app: Launch an application. params: {app: str, flags: str}
 - screenshot: Take a screenshot. params: {region: null | [x,y,w,h]}
 - ocr_read: Read text from screen region. params: {region: null | [x,y,w,h]}
-- browser_open: Open URL in browser (Playwright). params: {url: str}
-- browser_search: Search the web (Playwright). params: {query: str, engine: "google"|"duckduckgo"}
-- browser_click: Click a web page element (Playwright). params: {selector: str} (CSS or XPath selector)
-- browser_type: Type text into a web page input (Playwright). params: {selector: str, text: str}
-- browser_navigate: Navigate Playwright page to a URL. params: {url: str}
-- browser_extract: Extract text from a web element (Playwright). params: {selector: str, attribute: str (optional)}
+- browser_open: Open URL in system default browser. params: {url: str}
+- browser_search: Search the web in system browser. params: {query: str, engine: "google"|"duckduckgo"}
+- play_youtube: Play a video on YouTube using Playwright. params: {query: str}
+- play_spotify: Open Spotify and search. params: {query: str}
 - file_read: Read a file. params: {path: str}
 - file_write: Write to a file. params: {path: str, content: str, mode: "w"|"a"}
 - file_delete: Delete a file/directory. params: {path: str}
-- create_folder: Create a directory. params: {path: str}
 - clipboard_copy: Copy text to clipboard. params: {text: str}
 - clipboard_paste: Get current clipboard content. params: {}
 - speak: Say something aloud. params: {text: str}
 - wait: Pause execution. params: {seconds: float}
 - notify: Show desktop notification. params: {title: str, message: str}
 
-INTENT INFERENCE RULES:
-- "that browser thing" / "the browser" / "browser" -> open Edge
-- "search for X" without specifying app -> browser_search in Edge
-- "open X" where X is vague -> try to match to closest known app
-- "youtube" alone -> browser_open https://youtube.com
-- "github" alone -> browser_open https://github.com
-- "gmail" alone -> browser_open https://gmail.com
-- Single word that matches an app name -> open that app
-- "play X" -> search YouTube for X
-- "find X" / "look up X" / "google X" -> browser_search for X
-- "code" / "coding" / "editor" -> open vscode or antigravity
-- "files" / "folder" -> open explorer
-- "terminal" / "console" -> open cmd or powershell
-- If command is completely unclear -> use speak tool to ask one clarifying question
+MEDIA RULES (CRITICAL — follow exactly):
+- "play X" / "play X on youtube" / "watch X" / "put on X" → use play_youtube tool ONLY
+- "play X on spotify" / "open X in spotify" → use play_spotify tool ONLY
+- NEVER use browser_type, browser_click, or browser_search for YouTube or Spotify
+- "open X website" / "go to X.com" → use browser_open with the URL
+- For any music/video request: use dedicated media tools, not generic browser tools
 
-CONTEXT RULES:
-- Always prefer Edge over Chrome
-- Always use C:\\Users\\yashu\\Desktop for desktop paths, never ~/Desktop
-- For multi-step tasks, break into smallest possible atomic steps
-- Always add wait(1.0) after open_app before any keyboard/mouse interaction
-- For browser searches, use browser_search tool, not type_text
+APP RULES:
+- "open calculator" → open_app with app: "calculator"
+- "open notepad" → open_app with app: "notepad"
+- Single words like "spotify", "discord", "chrome" → use open_app
+- Creating folders: use terminal with mkdir command
 
-RESPONSE RULES:
-- Always output valid JSON, no markdown
-- If genuinely ambiguous between 2 interpretations, pick the most likely one and proceed
-- Never ask for clarification unless the command is completely meaningless
-- Assume the user wants the fastest path to their goal
-- Mark is_destructive: true for file_delete, file_write (overwrite), or terminal commands that modify system state.
+GENERAL RULES:
+1. Always respond with a JSON object — no markdown, no extra text.
+2. Mark is_destructive: true for file_delete, file_write (overwrite), or terminal commands that modify system state.
+3. Break complex tasks into small, verifiable steps.
+4. If a task requires reading the screen first, add a screenshot/ocr step before clicking.
+5. If the user's intent is ambiguous, pick the most likely interpretation and proceed.
+6. Desktop path is C:\\Users\\yashu\\Desktop
 
-RESPONSE FORMAT (strict JSON only):
-{"goal": "one-sentence description", "steps": [{"tool": "tool_name", "params": {}, "description": "human-readable", "requires_confirmation": false, "is_destructive": false}]}
+RESPONSE FORMAT:
+{
+  "goal": "one-sentence description of what you're accomplishing",
+  "steps": [
+    {
+      "tool": "tool_name",
+      "params": { ... },
+      "description": "human-readable description",
+      "requires_confirmation": false,
+      "is_destructive": false
+    }
+  ]
+}
 """
-
-
-# ── JSON Extraction Helpers ───────────────────────────────────────────────────
-
-def _extract_json(raw: str) -> dict | None:
-    """Try multiple strategies to extract valid JSON from an LLM response."""
-    text = raw.strip()
-
-    # 1. Strip markdown code fences
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```", "", text)
-    text = text.strip()
-
-    # 2. Direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # 3. Find the outermost { ... } block
-    brace_start = text.find("{")
-    brace_end = text.rfind("}")
-    if brace_start != -1 and brace_end > brace_start:
-        candidate = text[brace_start : brace_end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            pass
-
-    # 4. Regex: greedy match of a JSON-like object
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-
-    # 5. Try fixing common issues: trailing commas
-    cleaned = re.sub(r",\s*([}\]])", r"\1", text)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    return None
 
 
 # ── LLM Planner ───────────────────────────────────────────────────────────────
@@ -176,31 +128,45 @@ class LLMPlanner:
 
     def _init_client(self):
         provider = self.settings.llm_provider
+
+        # Resolve API key and base URL from env vars first, then settings
+        api_key = (
+            os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or self.settings.llm_api_key
+        )
+        base_url = (
+            os.environ.get("OPENAI_BASE_URL")
+            or self.settings.llm_base_url
+        )
+
+        logger.info("LLM provider: %s | key prefix: %s | base_url: %s",
+                    provider, (api_key or "")[:10], base_url)
+
         if provider == "anthropic":
             try:
                 import anthropic
-                return anthropic.Anthropic(api_key=self.settings.llm_api_key)
-            except ImportError:
-                raise ImportError("Install anthropic: pip install anthropic")
+                return anthropic.Anthropic(api_key=api_key)
+            except ImportError as e:
+                raise ImportError("Install anthropic: pip install anthropic") from e
+
         elif provider == "openai":
             try:
                 import openai
-                api_key = os.environ.get("OPENAI_API_KEY") or self.settings.llm_api_key
-                base_url = os.environ.get("OPENAI_BASE_URL") or self.settings.llm_base_url
-                print(f"  🔑 OpenAI api_key starts with: {api_key[:10]}..." if api_key else "  ⚠️ No API key found!")
-                kwargs = {"api_key": api_key}
+                kwargs: dict[str, Any] = {"api_key": api_key}
                 if base_url:
                     kwargs["base_url"] = base_url
-                client = openai.OpenAI(**kwargs)
-                return client
-            except ImportError:
-                raise ImportError("Install openai: pip install openai")
+                return openai.OpenAI(**kwargs)
+            except ImportError as e:
+                raise ImportError("Install openai: pip install openai") from e
+
         elif provider == "ollama":
             try:
                 import ollama
                 return ollama
-            except ImportError:
-                raise ImportError("Install ollama: pip install ollama")
+            except ImportError as e:
+                raise ImportError("Install ollama: pip install ollama") from e
+
         else:
             raise ValueError(f"Unknown LLM provider: {provider}")
 
@@ -219,9 +185,7 @@ class LLMPlanner:
         loop = asyncio.get_event_loop()
 
         raw = await loop.run_in_executor(None, self._call_llm, prompt)
-        result = self._parse_plan(command, raw)
-        self._last_plan = result
-        return result
+        return self._parse_plan(command, raw)
 
     def _call_llm(self, prompt: str) -> str:
         provider = self.settings.llm_provider
@@ -260,19 +224,28 @@ class LLMPlanner:
         return "{}"
 
     def _parse_plan(self, original_command: str, raw: str) -> Plan:
-        """Parse LLM JSON response into a Plan object.
-        Uses multi-strategy extraction to handle messy LLM output."""
-        data = _extract_json(raw)
+        """Parse LLM JSON response into a Plan object."""
+        raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except json.JSONDecodeError:
+                    data = None
+            else:
+                data = None
 
         if data is None:
-            # All extraction strategies failed — provide a clear fallback
-            print(f"  ⚠️  LLM returned non-JSON. Raw ({len(raw)} chars): {raw[:120]}...")
             return Plan(
                 goal=original_command,
                 steps=[ActionStep(
                     tool="speak",
-                    params={"text": f"I couldn't parse a plan for that. Please try rephrasing."},
-                    description="Report parse failure",
+                    params={"text": f"I wasn't sure how to do that: {raw[:200]}"},
+                    description="Report uncertainty",
                 )],
                 raw_response=raw,
             )
@@ -286,18 +259,6 @@ class LLMPlanner:
                 requires_confirmation=s.get("requires_confirmation", False),
                 is_destructive=s.get("is_destructive", False),
             ))
-
-        if not steps:
-            # JSON parsed but had no steps — still provide feedback
-            return Plan(
-                goal=data.get("goal", original_command),
-                steps=[ActionStep(
-                    tool="speak",
-                    params={"text": f"I understood your request but generated no action steps."},
-                    description="Empty plan notification",
-                )],
-                raw_response=raw,
-            )
 
         return Plan(
             goal=data.get("goal", original_command),
@@ -313,17 +274,12 @@ class LLMPlanner:
             f"Step: {failed_step.description}\n"
             f"Tool: {failed_step.tool}, Params: {failed_step.params}\n"
             f"Failure reason: {verification.reason}\n\n"
-            f"Suggest ONE recovery action in the same JSON step format.\n"
-            f"Reply with a JSON object only, no extra text."
+            f"Suggest ONE recovery action in the same JSON step format."
         )
         loop = asyncio.get_event_loop()
         raw = await loop.run_in_executor(None, self._call_llm, prompt)
-
-        data = _extract_json(raw)
-        if data is None:
-            return None
-
         try:
+            data = json.loads(raw)
             if "steps" in data and data["steps"]:
                 s = data["steps"][0]
             else:
@@ -333,37 +289,17 @@ class LLMPlanner:
                 params=s.get("params", {}),
                 description=s.get("description", "Recovery step"),
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Recovery parse failed: %s", e)
             return None
 
-    async def summarize(self, plan: Plan, results: list) -> str:
+    async def summarize(self, plan: Optional["Plan"], results: list) -> str:
         """Generate a brief spoken summary of what was accomplished."""
+        if plan is None:
+            return "The command could not be processed."
         success_count = sum(1 for r in results if getattr(r, "success", True))
         if len(results) == 0:
             return f"I've planned to {plan.goal}."
         if success_count == len(results):
             return f"Done. I've completed: {plan.goal}."
         return f"Completed {success_count} of {len(results)} steps for: {plan.goal}."
-
-    async def is_goal_complete(
-        self, goal: str, history: list[str], vision_feedback: str
-    ) -> bool:
-        """Ask the LLM whether the user's original goal is satisfied.
-        Used by the autonomous completion loop to decide when to stop."""
-        import asyncio
-        history_str = "\n".join(f"  {i+1}. {h}" for i, h in enumerate(history))
-        prompt = (
-            f"Original goal: {goal}\n\n"
-            f"Steps completed so far:\n{history_str}\n\n"
-            f"Latest screen analysis: {vision_feedback}\n\n"
-            f"Based on the steps completed and the current screen state, "
-            f"is the original goal fully achieved?\n"
-            f'Respond with ONLY a JSON object: {{"complete": true/false, "reason": "brief explanation"}}'
-        )
-        loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(None, self._call_llm, prompt)
-
-        data = _extract_json(raw)
-        if data is None:
-            return False
-        return bool(data.get("complete", False))

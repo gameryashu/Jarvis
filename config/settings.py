@@ -43,19 +43,6 @@ class Settings:
     typing_interval: float = 0.05            # Seconds between keystrokes
     ocr_language: str = "eng"
 
-    # ── Vision Verification ───────────────────────────────
-    vision_provider: str = "anthropic"       # anthropic (Claude Vision)
-    vision_api_key: str = ""                 # Loaded from env ANTHROPIC_API_KEY
-    vision_model: str = "claude-sonnet-4-20250514"
-    vision_max_image_size: int = 1568        # Max px dimension for resized screenshots
-
-    # ── Playwright Browser Automation ─────────────────────
-    playwright_headless: bool = True         # Run Playwright browser headless
-    playwright_timeout: int = 5000           # Element wait timeout in ms
-
-    # ── Autonomous Loop ───────────────────────────────────
-    autonomous_max_iterations: int = 15      # Safety cutoff for autonomous loop
-
     # ── Memory ────────────────────────────────────────────
     memory_dir: str = "~/.jarvis/memory"
     memory_max_context_items: int = 20
@@ -102,16 +89,10 @@ class Settings:
             if val:
                 setattr(s, attr, val)
 
-        # Auto-detect API key from env if not set
-        if not s.llm_api_key:
-            if s.llm_provider == "anthropic":
-                s.llm_api_key = os.getenv("ANTHROPIC_API_KEY", "")
-            elif s.llm_provider == "openai":
-                s.llm_api_key = os.getenv("OPENAI_API_KEY", "")
-
-        # Auto-detect vision API key from env if not set
-        if not s.vision_api_key:
-            s.vision_api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        # Override base_url from environment (critical for Groq / custom endpoints)
+        base_url_env = os.getenv("OPENAI_BASE_URL")
+        if base_url_env:
+            s.llm_base_url = base_url_env
 
         return s
 
