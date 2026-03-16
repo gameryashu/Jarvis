@@ -128,20 +128,19 @@ class LLMPlanner:
 
     def _init_client(self):
         provider = self.settings.llm_provider
+        # Resolve API key based on provider
+        if provider == "anthropic":
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or self.settings.llm_api_key
+            base_url = self.settings.llm_base_url
+        elif provider == "openai":
+            api_key = os.environ.get("OPENAI_API_KEY") or self.settings.llm_api_key
+            base_url = os.environ.get("OPENAI_BASE_URL") or self.settings.llm_base_url
+        else:
+            api_key = self.settings.llm_api_key
+            base_url = self.settings.llm_base_url
 
-        # Resolve API key and base URL from env vars first, then settings
-        api_key = (
-            os.environ.get("OPENAI_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or self.settings.llm_api_key
-        )
-        base_url = (
-            os.environ.get("OPENAI_BASE_URL")
-            or self.settings.llm_base_url
-        )
-
-        logger.info("LLM provider: %s | key prefix: %s | base_url: %s",
-                    provider, (api_key or "")[:10], base_url)
+        logger.info("LLM provider: %s | key set: %s | base_url: %s",
+                    provider, bool(api_key), base_url)
 
         if provider == "anthropic":
             try:
