@@ -1,0 +1,11 @@
+llm_provider: openai
+llm_model: llama-3.3-70b-versatile
+llm_base_url: https://api.groq.com/openai/v1/
+stt_provider: whisper
+stt_model: base
+require_wake_word: true
+wake_words:
+  - hey jarvis
+  - jarvis
+tts_provider: pyttsx3
+confirm_destructive: false
