@@ -41,7 +41,7 @@ class FeedbackLoop:
         4. For file operations, check file existence/content.
         """
         if not result.success:
-            return VerificationResult(success=False, reason=result.error or "Unknown error")
+            return VerificationResult(success=False, reason=result.error)
 
         tool = step.tool
 
@@ -115,8 +115,6 @@ class FeedbackLoop:
             ocr_result = await self.executor.execute(
                 ActionStep(tool="ocr_read", params={}, description="OCR feedback")
             )
-            if not ocr_result.success:
-                return VerificationResult(success=True, reason="OCR unavailable, assuming success.")
             screen_text = ocr_result.output or ""
 
             # Check for obvious error states

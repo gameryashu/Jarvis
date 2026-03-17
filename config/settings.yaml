@@ -32,7 +32,7 @@ mouse_move_duration: 0.3
 typing_interval: 0.04
 ocr_language: eng
 screenshot_interval: 1.0
-confirm_destructive: true        # Set false to skip prompts before destructive ops
+confirm_destructive: false       # Set true to prompt before destructive ops
 
 # ── Memory ─────────────────────────────────────────────────
 memory_dir: ~/.jarvis/memory
@@ -62,3 +62,7 @@ enabled_tools:
   - clipboard
   - notifications
   - media
+
+voice_silence_threshold: 0.05
+
+voice_silence_duration: 2.0

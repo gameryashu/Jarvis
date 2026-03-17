@@ -53,68 +53,46 @@ class RecoveryAction:
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are JARVIS, an expert AI system controller running on Windows 11.
-User: yashu | Desktop: C:\\Users\\yashu\\Desktop | Default browser: Microsoft Edge
+SYSTEM_PROMPT = r"""To build this accurately within your 800-token limit, what specific mechanics from each tool are you trying to replicate in the execution loop? Define the exact behaviors you need—such as Perplexity's search-to-action grounding, OpenClaw's screen parsing, or Claude's task decomposition—and I will extract the exact logic from your uploaded prompt files to synthesize the final system instruction.
 
-Your job is to translate a user's natural language command into a precise, executable action plan.
+1. Task Decomposition (Claude-style)
+The behavior I need:
+* Given `"open spotify and play lofi"`, decompose into ordered atomic steps: `open_app → wait → play_spotify`
+* Recognize implicit dependencies between steps (don't click a button before the window exists)
+* Know when a single step is sufficient vs. when a task truly needs 3+ steps
+Current gap: The LLM sometimes emits 5 steps for a 1-step task, or 1 step for a task that requires UI verification first.
+2. Screen-State Grounding (OpenClaw/computer-use style)
+The behavior I need:
+* Before any
+mouse_click, emit a
+screenshot +
+ocr_read step to verify the target UI element actually exists
+* After a destructive or long-running action, emit a
+screenshot to confirm the screen changed
+* If the OCR text doesn't match what's expected → flag the step as needing recovery, not just pass
+Current gap: The
+feedback.py_verify_ui_action()sleeps 0.5s and runs OCR, but theplannerdoesn't request screenshot steps proactively — it only does so reactively. The grounding needs to happen at plan-time.
 
-You have access to these tools:
-- terminal: Run shell commands. params: {command: str}
-- mouse_move: Move mouse to coordinates. params: {x: int, y: int}
-- mouse_click: Click mouse. params: {x: int, y: int, button: "left"|"right"|"double"}
-- mouse_scroll: Scroll. params: {x: int, y: int, direction: "up"|"down", amount: int}
-- type_text: Type text. params: {text: str}
-- key_press: Press keyboard shortcuts. params: {keys: str} e.g. "ctrl+c"
-- open_app: Launch an application. params: {app: str, flags: str}
-- screenshot: Take a screenshot. params: {region: null | [x,y,w,h]}
-- ocr_read: Read text from screen region. params: {region: null | [x,y,w,h]}
-- browser_open: Open URL in system default browser. params: {url: str}
-- browser_search: Search the web in system browser. params: {query: str, engine: "google"|"duckduckgo"}
-- play_youtube: Play a video on YouTube using Playwright. params: {query: str}
-- play_spotify: Open Spotify and search. params: {query: str}
-- file_read: Read a file. params: {path: str}
-- file_write: Write to a file. params: {path: str, content: str, mode: "w"|"a"}
-- file_delete: Delete a file/directory. params: {path: str}
-- clipboard_copy: Copy text to clipboard. params: {text: str}
-- clipboard_paste: Get current clipboard content. params: {}
-- speak: Say something aloud. params: {text: str}
-- wait: Pause execution. params: {seconds: float}
-- notify: Show desktop notification. params: {title: str, message: str}
-
-MEDIA RULES (CRITICAL — follow exactly):
-- "play X" / "play X on youtube" / "watch X" / "put on X" → use play_youtube tool ONLY
-- "play X on spotify" / "open X in spotify" → use play_spotify tool ONLY
-- NEVER use browser_type, browser_click, or browser_search for YouTube or Spotify
-- "open X website" / "go to X.com" → use browser_open with the URL
-- For any music/video request: use dedicated media tools, not generic browser tools
-
-APP RULES:
-- "open calculator" → open_app with app: "calculator"
-- "open notepad" → open_app with app: "notepad"
-- Single words like "spotify", "discord", "chrome" → use open_app
-- Creating folders: use terminal with mkdir command
-
-GENERAL RULES:
-1. Always respond with a JSON object — no markdown, no extra text.
-2. Mark is_destructive: true for file_delete, file_write (overwrite), or terminal commands that modify system state.
-3. Break complex tasks into small, verifiable steps.
-4. If a task requires reading the screen first, add a screenshot/ocr step before clicking.
-5. If the user's intent is ambiguous, pick the most likely interpretation and proceed.
-6. Desktop path is C:\\Users\\yashu\\Desktop
-
-RESPONSE FORMAT:
-{
-  "goal": "one-sentence description of what you're accomplishing",
-  "steps": [
-    {
-      "tool": "tool_name",
-      "params": { ... },
-      "description": "human-readable description",
-      "requires_confirmation": false,
-      "is_destructive": false
-    }
-  ]
-}
+3. Search-to-Action Grounding (Perplexity-style)
+The behavior I need:
+* When the command is ambiguous (`"play something chill"`), resolve it to a concrete query before executing — don't delegate ambiguity to YouTube's search algorithm
+* For file/folder paths, infer the absolute path from context (`"desktop"` → `C:\Users\yashu\Desktop`) rather than passing relative paths that fail
+Current gap: The system prompt says `Path: C:\Users\yashu\Desktop` but the LLM still sometimes emits `~/Desktop` or relative paths in `file_write` params.
+4. Failure-Aware Replanning (Agent loop style)
+The behavior I need:
+* If step N fails, the loop should tell the LLM what failed and why, then ask for a single corrective step — not re-plan the entire task from scratch
+* Track `failed_tools` set so the same broken approach isn't retried
+* Max 5 total attempts across the whole session, not per-step
+Current gap: `main.py`'s `_autonomous_loop()` already has `failed_tools` tracking, but `planner.recover()` gets sent the full failure context and sometimes re-generates the entire original plan instead of one targeted fix.
+5. JSON Output Enforcement
+The behavior I need:
+* The LLM never wraps output in markdown fences (```json...```)
+* Every response has `"goal"` and `"steps"` at the top level — no nesting surprises
+* `params` always has the exact keys the tool handler expects (no extra/missing keys)
+Current gap: Groq models occasionally emit \```json`fences even with`response_format={"type": "json_object"}`set. The`_parse_plan()` method strips these, but it should never need to.
+What I Need From You
+If you have uploaded prompt files from Perplexity, OpenClaw, or other agent systems, the exact extractions I need are:
+MechanicExtract ThisScreen groundingThe exact instruction that forces a screenshot step before any clickPath resolutionThe rule that maps `"desktop"` / `"downloads"` → absolute Windows pathsRecovery framingThe exact prompt structure for single-step corrective replanningAmbiguity resolutionThe rule that forces the LLM to pick a concrete interpretation and state it in `"goal"`JSON strictnessThe instruction pattern that eliminates markdown wrapping in JSON-mode models
 """
 
 
@@ -128,19 +106,20 @@ class LLMPlanner:
 
     def _init_client(self):
         provider = self.settings.llm_provider
-        # Resolve API key based on provider
-        if provider == "anthropic":
-            api_key = os.environ.get("ANTHROPIC_API_KEY") or self.settings.llm_api_key
-            base_url = self.settings.llm_base_url
-        elif provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY") or self.settings.llm_api_key
-            base_url = os.environ.get("OPENAI_BASE_URL") or self.settings.llm_base_url
-        else:
-            api_key = self.settings.llm_api_key
-            base_url = self.settings.llm_base_url
 
-        logger.info("LLM provider: %s | key set: %s | base_url: %s",
-                    provider, bool(api_key), base_url)
+        # Resolve API key and base URL from env vars first, then settings
+        api_key = (
+            os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or self.settings.llm_api_key
+        )
+        base_url = (
+            os.environ.get("OPENAI_BASE_URL")
+            or self.settings.llm_base_url
+        )
+
+        logger.info("LLM provider: %s | key prefix: %s | base_url: %s",
+                    provider, (api_key or "")[:10], base_url)
 
         if provider == "anthropic":
             try:
