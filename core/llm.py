@@ -53,47 +53,48 @@ class RecoveryAction:
 
 # ── System Prompt ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = r"""To build this accurately within your 800-token limit, what specific mechanics from each tool are you trying to replicate in the execution loop? Define the exact behaviors you need—such as Perplexity's search-to-action grounding, OpenClaw's screen parsing, or Claude's task decomposition—and I will extract the exact logic from your uploaded prompt files to synthesize the final system instruction.
+SYSTEM_PROMPT = r"""You are JARVIS, Tony Stark's AI — running on Windows 11 for Yatharth (HP Omen, RTX 4050).
+You are proactive, intelligent, and execute tasks autonomously.
+Output ONLY raw JSON. No markdown. No fences. No preamble.
 
-1. Task Decomposition (Claude-style)
-The behavior I need:
-* Given `"open spotify and play lofi"`, decompose into ordered atomic steps: `open_app → wait → play_spotify`
-* Recognize implicit dependencies between steps (don't click a button before the window exists)
-* Know when a single step is sufficient vs. when a task truly needs 3+ steps
-Current gap: The LLM sometimes emits 5 steps for a 1-step task, or 1 step for a task that requires UI verification first.
-2. Screen-State Grounding (OpenClaw/computer-use style)
-The behavior I need:
-* Before any
-mouse_click, emit a
-screenshot +
-ocr_read step to verify the target UI element actually exists
-* After a destructive or long-running action, emit a
-screenshot to confirm the screen changed
-* If the OCR text doesn't match what's expected → flag the step as needing recovery, not just pass
-Current gap: The
-feedback.py_verify_ui_action()sleeps 0.5s and runs OCR, but theplannerdoesn't request screenshot steps proactively — it only does so reactively. The grounding needs to happen at plan-time.
+PATHS: Desktop=C:\Users\yashu\Desktop | Downloads=C:\Users\yashu\Downloads | Home=C:\Users\yashu
+BROWSER: Default is Microsoft Edge. Chrome is NOT installed.
 
-3. Search-to-Action Grounding (Perplexity-style)
-The behavior I need:
-* When the command is ambiguous (`"play something chill"`), resolve it to a concrete query before executing — don't delegate ambiguity to YouTube's search algorithm
-* For file/folder paths, infer the absolute path from context (`"desktop"` → `C:\Users\yashu\Desktop`) rather than passing relative paths that fail
-Current gap: The system prompt says `Path: C:\Users\yashu\Desktop` but the LLM still sometimes emits `~/Desktop` or relative paths in `file_write` params.
-4. Failure-Aware Replanning (Agent loop style)
-The behavior I need:
-* If step N fails, the loop should tell the LLM what failed and why, then ask for a single corrective step — not re-plan the entire task from scratch
-* Track `failed_tools` set so the same broken approach isn't retried
-* Max 5 total attempts across the whole session, not per-step
-Current gap: `main.py`'s `_autonomous_loop()` already has `failed_tools` tracking, but `planner.recover()` gets sent the full failure context and sometimes re-generates the entire original plan instead of one targeted fix.
-5. JSON Output Enforcement
-The behavior I need:
-* The LLM never wraps output in markdown fences (```json...```)
-* Every response has `"goal"` and `"steps"` at the top level — no nesting surprises
-* `params` always has the exact keys the tool handler expects (no extra/missing keys)
-Current gap: Groq models occasionally emit \```json`fences even with`response_format={"type": "json_object"}`set. The`_parse_plan()` method strips these, but it should never need to.
-What I Need From You
-If you have uploaded prompt files from Perplexity, OpenClaw, or other agent systems, the exact extractions I need are:
-MechanicExtract ThisScreen groundingThe exact instruction that forces a screenshot step before any clickPath resolutionThe rule that maps `"desktop"` / `"downloads"` → absolute Windows pathsRecovery framingThe exact prompt structure for single-step corrective replanningAmbiguity resolutionThe rule that forces the LLM to pick a concrete interpretation and state it in `"goal"`JSON strictnessThe instruction pattern that eliminates markdown wrapping in JSON-mode models
-"""
+TOOLS:
+terminal:{command} | open_app:{app,flags?} | wait:{seconds}
+mouse_move:{x,y} | mouse_click:{x,y,button} | mouse_scroll:{x,y,direction,amount}
+type_text:{text} | key_press:{keys}
+screenshot:{region?} | ocr_read:{region?} | analyze_screen:{}
+browser_open:{url} | browser_navigate:{url} | browser_search:{query}
+browser_click:{selector} | browser_type:{selector,text} | browser_extract:{selector}
+play_youtube:{query} | play_spotify:{query} | web_search:{query}
+file_read:{path} | file_write:{path,content,mode?} | file_delete:{path} | create_folder:{path}
+run_code:{code,language} | clipboard_copy:{text} | clipboard_paste:{}
+focus_window:{title} | system_info:{metric}
+speak:{text} | notify:{title,message}
+
+APP ALIASES: calculator=calc | chrome=start msedge | edge=start msedge | terminal=wt | notepad=notepad
+
+INTELLIGENCE RULES:
+1. Minimum steps always. "open calculator"=1 step. "play lofi"=1 step.
+2. Infer intent: "something chill" → play_youtube:{query:"lofi chill beats"}
+3. "what time"→terminal:{command:"time /t"} | "what date"→terminal:{command:"date /t"}
+4. "how much RAM"→system_info:{metric:"ram"} | "CPU usage"→system_info:{metric:"cpu"}
+5. Before mouse_click: always analyze_screen first to verify element exists
+6. After open_app: wait:{seconds:1.5} before any interaction
+7. Never use browser_type/browser_click for YouTube — always use play_youtube
+8. For web searches: use web_search tool (opens system browser, no bot detection)
+9. If task needs 3+ browser interactions: use Playwright tools
+10. Speak confirmation after completing important tasks
+11. Use file_write to save files instead of opening text editors
+
+PATH RULES: Never ~/Desktop. Never relative paths. Always C:\Users\yashu\Desktop.
+
+RECOVERY: One targeted fix step only. Never re-plan entire task. Track failed selectors.
+
+MEDIA: play/watch/listen X → play_youtube:{query:X} | X on spotify → play_spotify:{query:X}
+
+OUTPUT: {"goal":"sentence","steps":[{"tool":"name","params":{},"description":"text","requires_confirmation":false,"is_destructive":false}]}"""
 
 
 # ── LLM Planner ───────────────────────────────────────────────────────────────
@@ -149,7 +150,15 @@ class LLMPlanner:
             raise ValueError(f"Unknown LLM provider: {provider}")
 
     def _build_context(self, command: str) -> str:
-        """Inject recent memory context into the prompt."""
+        """Inject recent/relevant memory context into the prompt."""
+        # Smart memory trigger
+        cmd_lower = command.lower()
+        if any(trigger in cmd_lower for trigger in ["that thing", "yesterday", "my project", "remember", "last time"]):
+            results = self.memory.search(command, top_k=3)
+            ctx_str = "\n".join(f"- {item.command} -> {item.goal}" for item in results)
+            if ctx_str:
+                return f"Relevant past memories:\n{ctx_str}\n\nCurrent command: {command}"
+
         recent = self.memory.get_recent_context(self.settings.memory_max_context_items)
         if not recent:
             return command

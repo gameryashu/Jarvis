@@ -76,6 +76,36 @@ async def _autonomous_loop(
     """
     global JARVIS_INTERRUPT
 
+    try:
+        if command.strip().lower() in ("status", "jarvis status", "are you working"):
+            import httpx, os
+            base = os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1/")
+            key = os.getenv("OPENAI_API_KEY", "")
+            try:
+                with httpx.Client() as client:
+                    resp = client.get(f"{base}models", headers={"Authorization": f"Bearer {key}"}, timeout=5)
+                    groq_ok = resp.status_code == 200
+            except Exception:
+                groq_ok = False
+            
+            p_ok = executor._persistent_page is not None
+            mem_size = 0
+            try:
+                if memory._sessions_path.exists():
+                    mem_size = memory._sessions_path.stat().st_size
+            except Exception: pass
+            
+            status_text = "All systems operational. " if groq_ok else "Warning: Groq API unreachable. "
+            if recent_acts := memory.get_recent_context(5):
+                status_text += f"Last action was: {recent_acts[-1].split('→')[-1].strip()}."
+            else:
+                status_text += "No recent actions in memory."
+            
+            print(status_text)
+            return status_text
+    except Exception as e:
+        logger.error("Status check error: %s", e)
+
     plan: Optional[Plan] = None
     results: list = []
     failed_tools: set = set()
@@ -108,7 +138,7 @@ async def _autonomous_loop(
         print(f"  ⚙️  {step.description}")
         iteration += 1
 
-        try:
+        try:  
             result = await executor.execute(step)
             results.append(result)
 
@@ -194,138 +224,129 @@ async def run_interactive(settings: Settings, headless: bool = False):
 
 # ── Voice mode ────────────────────────────────────────────────────────────────
 
-async def run_voice(settings: Settings):
-    """
-    Hands-free wake-word voice mode.
-    Continuously listens via pyaudio, transcribes with Whisper,
-    checks for wake word, and runs the command pipeline.
-    """
-    global JARVIS_INTERRUPT
-
-    try:
-        import whisper as whisper_lib
-        import pyaudio
-        import numpy as np
-    except ImportError as e:
-        print(f"❌ Voice mode requires: whisper, pyaudio, numpy\n   pip install openai-whisper pyaudio numpy\n   Error: {e}")
-        return
-
-    print("\n🤖 JARVIS Voice Mode starting...")
-    print("🔊 Loading Whisper model 'base'...")
-    whisper_model = whisper_lib.load_model("base")
-    print("✅ Whisper loaded.")
-
+async def run_voice(settings):
+    print("\n🤖 JARVIS initializing...\n")
+    
+    # Initialize all components ONCE
     memory = MemoryManager(settings)
     planner = LLMPlanner(settings, memory)
     executor = ActionExecutor(settings)
     feedback = FeedbackLoop(settings, executor)
-
-    SAMPLE_RATE = settings.voice_sample_rate  # 16000
-    SILENCE_THRESHOLD = settings.voice_silence_threshold  # 0.01
-    SILENCE_DURATION = settings.voice_silence_duration    # 1.5
-    CHUNK = 1024
-
+    memory.log_session_start()
+    
+    # Load Whisper
+    import whisper
+    print("🔊 Loading Whisper model...")
+    model = whisper.load_model(settings.stt_model)
+    print("✅ Whisper loaded.\n")
+    
+    # Speak startup
+    await executor.speak("JARVIS online. All systems operational.")
+    print("🎤 Listening for 'Hey Jarvis'... (Press Ctrl+C to stop)\n")
+    
+    import pyaudio, numpy as np
     pa = pyaudio.PyAudio()
-    stream = pa.open(
-        format=pyaudio.paFloat32,
-        channels=1,
-        rate=SAMPLE_RATE,
-        input=True,
-        frames_per_buffer=CHUNK,
-    )
-
-    print(f"\n🎤 Listening for 'Hey Jarvis'... (Ctrl+C to stop)\n")
-    wake_words = [w.lower() for w in settings.wake_words]
-
-    loop = asyncio.get_event_loop()
+    CHUNK, RATE = 1024, 16000
+    SILENCE_THRESHOLD = 0.04
+    SILENCE_DURATION = 1.5
+    
+    HALLUCINATIONS = {"thanks for watching","thank you","subscribe","bye",
+                      "like and share","see you","hello","you","the","a","i"}
+    ACTION_WORDS = {"open","play","search","find","create","write","tell","what",
+                    "show","go","start","stop","close","type","run","make","get",
+                    "time","date","jarvis","how","where","when","is","are","can",
+                    "take","screenshot","folder","file","download","launch","music"}
+    
+    stream = pa.open(format=pyaudio.paFloat32, channels=1, rate=RATE,
+                     input=True, frames_per_buffer=CHUNK)
+    
     recording = False
-    frames: list = []
-    silence_start: Optional[float] = None
-
-    import time
-
+    frames = []
+    silence_start = None
+    loop = asyncio.get_event_loop()
+    
     try:
         while True:
             data = await loop.run_in_executor(None, stream.read, CHUNK, False)
             samples = np.frombuffer(data, dtype=np.float32)
-            energy = float(np.sqrt(np.mean(samples ** 2)))
-            is_speech = energy > SILENCE_THRESHOLD
-
-            if is_speech:
+            energy = float(np.sqrt(np.mean(samples**2)))
+            
+            if energy > SILENCE_THRESHOLD:
                 if not recording:
                     recording = True
                     frames = []
                 frames.append(data)
                 silence_start = None
-
             elif recording:
                 frames.append(data)
                 if silence_start is None:
+                    import time
                     silence_start = time.time()
                 elif time.time() - silence_start >= SILENCE_DURATION:
                     recording = False
-                    silence_start = None
-
-                    # Transcribe
-                    audio_bytes = b"".join(frames)
-                    frames = []
-
+                    audio_np = np.frombuffer(b"".join(frames), dtype=np.float32)
+                    
+                    def _transcribe():
+                        result = model.transcribe(audio_np, language="en", fp16=False)
+                        return result["text"].strip().lower()
+                    
+                    transcript = await loop.run_in_executor(None, _transcribe)
+                    words = transcript.split()
+                    
+                    # Filter hallucinations
+                    if len(words) < 4: continue
+                    if transcript in HALLUCINATIONS: continue
+                    if not any(w in ACTION_WORDS for w in words): continue
+                    
+                    print(f"🎤 Heard: {transcript}")
+                    
+                    # Check wake word
+                    has_wake = "jarvis" in transcript
+                    if not has_wake: continue
+                    
+                    # Strip wake word
+                    for wake in ["hey jarvis", "jarvis"]:
+                        if wake in transcript:
+                            command = transcript.split(wake, 1)[-1].strip().lstrip(",").strip()
+                            break
+                    
+                    if not command or len(command) < 2: continue
+                    
+                    print(f"📝 Command: {command}")
+                    
                     try:
-                        audio_np = np.frombuffer(audio_bytes, dtype=np.float32)
-
-                        def _transcribe():
-                            result = whisper_model.transcribe(
-                                audio_np,
-                                language=settings.stt_language,
-                                fp16=False,
-                            )
-                            return result["text"].strip()
-
-                        transcript = await loop.run_in_executor(None, _transcribe)
-                        if not transcript:
-                            continue
-
-                        print(f"\n🎤 Heard: {transcript}")
-                        transcript_lower = transcript.lower()
-
-                        # Wake word check
-                        found_wake = any(w in transcript_lower for w in wake_words)
-                        if not found_wake:
-                            continue
-
-                        # Strip wake word
-                        command = transcript
-                        for w in wake_words:
-                            idx = transcript_lower.find(w)
-                            if idx != -1:
-                                command = transcript[idx + len(w):].strip().lstrip(",").strip()
-                                break
-
-                        if not command:
-                            await executor.speak("Yes, I'm listening.")
-                            continue
-
-                        print(f"📝 Command: {command}")
-                        JARVIS_INTERRUPT = False
-
-                        summary = await _autonomous_loop(command, planner, executor, feedback, memory)
-                        print(f"\n✅ {summary}")
+                        plan = await planner.plan(command)
+                        results = []
+                        for step in plan.steps:
+                            print(f"  ⚙️  {step.description}")
+                            result = await executor.execute(step)
+                            results.append(result)
+                            verified = await feedback.verify(step, result)
+                            if not verified.success:
+                                recovery = await planner.recover(step, verified)
+                                if recovery:
+                                    await executor.execute(recovery)
+                        
+                        summary = await planner.summarize(plan, results)
+                        print(f"✅ {summary}")
                         await executor.speak(summary)
-
+                        memory.save_interaction(command, plan, results)
+                    
                     except Exception as e:
-                        logger.error("Voice pipeline error: %s", e, exc_info=True)
                         print(f"❌ Error: {e}")
-
-            await asyncio.sleep(0)  # Yield control
-
+                        await executor.speak("I encountered an error. Please try again.")
+                    
+                    frames = []
+                    silence_start = None
+    
     except KeyboardInterrupt:
-        print("\n👋 Voice mode stopped.")
+        pass
     finally:
         stream.stop_stream()
         stream.close()
         pa.terminate()
-        await executor.close()
-        print("👋 JARVIS offline.")
+        memory.log_session_end()
+        print("\n👋 JARVIS offline.")
 
 
 # ── One-shot text mode ────────────────────────────────────────────────────────
@@ -408,14 +429,17 @@ def main():
 
     settings = Settings.load(args.config)
 
-    if args.voice:
-        asyncio.run(run_voice(settings))
-    elif args.interactive:
-        asyncio.run(run_interactive(settings, headless=args.headless))
-    elif args.text:
-        asyncio.run(run_text_command(args.text, settings))
-    else:
-        asyncio.run(run_jarvis(settings, headless=args.headless))
+    try:
+        if args.voice:
+            asyncio.run(run_voice(settings))
+        elif args.interactive:
+            asyncio.run(run_interactive(settings, headless=args.headless))
+        elif args.text:
+            asyncio.run(run_text_command(args.text, settings))
+        else:
+            asyncio.run(run_jarvis(settings, headless=args.headless))
+    except (KeyboardInterrupt, ValueError):
+        pass
 
 
 if __name__ == "__main__":

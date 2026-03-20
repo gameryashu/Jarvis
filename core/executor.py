@@ -303,12 +303,15 @@ class ActionExecutor:
         loop = asyncio.get_event_loop()
 
         def _ocr():
-            if region:
-                img = pyautogui.screenshot(region=tuple(region))
-            else:
-                img = pyautogui.screenshot()
-            lang = self.settings.ocr_language
-            return pytesseract.image_to_string(img, lang=lang)
+            try:
+                if region:
+                    img = pyautogui.screenshot(region=tuple(region))
+                else:
+                    img = pyautogui.screenshot()
+                lang = self.settings.ocr_language
+                return pytesseract.image_to_string(img, lang=lang)
+            except Exception as e:
+                return f"OCR unavailable: {e}"
 
         text = await loop.run_in_executor(None, _ocr)
         return text.strip()
@@ -321,19 +324,15 @@ class ActionExecutor:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: webbrowser.open(url))
 
-    async def _tool_browser_search(self, params: dict):
+    async def _tool_web_search(self, params: dict):
         """Search the web using the default browser."""
         query = params.get("query", "")
-        engine = params.get("engine", "google")
-        encoded = urllib.parse.quote_plus(query)
-        urls = {
-            "google": f"https://www.google.com/search?q={encoded}",
-            "duckduckgo": f"https://duckduckgo.com/?q={encoded}",
-        }
-        url = urls.get(engine, urls["google"])
+        url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+        import webbrowser
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: webbrowser.open(url))
         return url
+
 
     # ── Media Tools ───────────────────────────────────────────────────────────
 
@@ -352,18 +351,25 @@ class ActionExecutor:
             page = self._persistent_page
 
             print(f"   🎬 Navigating to YouTube search: {query}")
+            # Wait networkidle
             await page.goto(search_url, wait_until="networkidle", timeout=30000)
-
-            # Extract first real video URL via JS (bypasses Shadow DOM issues)
-            href = await page.evaluate("""
-                () => {
-                    const videos = document.querySelectorAll('ytd-video-renderer a#video-title');
-                    for (const v of videos) {
-                        if (v.href && v.href.includes('/watch')) return v.href;
+            
+            href = None
+            for attempt in range(3):
+                await asyncio.sleep(3)
+                href = await page.evaluate("""
+                    () => {
+                        const items = document.querySelectorAll('ytd-video-renderer');
+                        for (const item of items) {
+                            const a = item.querySelector('a#video-title');
+                            if (a && a.href && a.href.includes('/watch')) return a.href;
+                        }
+                        return null;
                     }
-                    return null;
-                }
-            """)
+                """)
+                if href:
+                    break
+                print(f"   ⏳ Retrying YouTube JS extraction (attempt {attempt + 2}/3)")
 
             if href:
                 print(f"   ▶️  Playing: {href}")
@@ -372,11 +378,13 @@ class ActionExecutor:
             else:
                 # Fallback: open search in system browser
                 logger.warning("Could not extract video href — falling back to system browser.")
+                import webbrowser
                 webbrowser.open(search_url)
                 return f"Opened YouTube search in browser: {query}"
 
         except Exception as e:
             logger.error("play_youtube failed: %s", e)
+            import webbrowser
             # Hard fallback
             webbrowser.open(search_url)
             return f"Opened YouTube search (fallback): {query}"
@@ -457,6 +465,14 @@ class ActionExecutor:
 
         await loop.run_in_executor(None, _delete)
 
+    async def _tool_create_folder(self, params: dict):
+        path = Path(params.get("path", "")).expanduser()
+        loop = asyncio.get_event_loop()
+        def _create():
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+        await loop.run_in_executor(None, _create)
+
     # ── Clipboard ─────────────────────────────────────────────────────────────
 
     async def _tool_clipboard_copy(self, params: dict):
@@ -475,6 +491,99 @@ class ActionExecutor:
             return await loop.run_in_executor(None, pyperclip.paste)
         except ImportError:
             return ""
+
+    # ── Advanced Features ─────────────────────────────────────────────────────
+
+    async def _tool_analyze_screen(self, params: dict) -> dict:
+        import pyautogui
+        try:
+            import pytesseract
+        except ImportError:
+            pytesseract = None
+        try:
+            import pygetwindow as gw
+        except ImportError:
+            gw = None
+
+        loop = asyncio.get_event_loop()
+
+        def _analyze():
+            screenshot = pyautogui.screenshot()
+            text = pytesseract.image_to_string(screenshot) if pytesseract else "OCR unavailable."
+            active = gw.getActiveWindow() if gw else None
+            app_name = active.title if active else ""
+            return {
+                "url": "",
+                "app_name": app_name,
+                "visible_text": text.strip()[:1000],
+                "window_title": app_name
+            }
+        return await loop.run_in_executor(None, _analyze)
+
+    async def _tool_run_code(self, params: dict):
+        code = params.get("code", "")
+        language = params.get("language", "python")
+        import tempfile, subprocess, sys
+        loop = asyncio.get_event_loop()
+        def _run():
+            with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w", encoding="utf-8") as f:
+                f.write(code)
+                tmp = f.name
+            try:
+                result = subprocess.run([sys.executable, tmp], capture_output=True, text=True, timeout=60)
+                return (result.stdout + "\n" + result.stderr).strip()
+            except Exception as e:
+                return f"Execution error: {e}"
+            finally:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+        return await loop.run_in_executor(None, _run)
+
+    async def _tool_focus_window(self, params: dict):
+        title = params.get("title", "")
+        loop = asyncio.get_event_loop()
+        def _focus():
+            try:
+                import pygetwindow as gw
+            except ImportError:
+                return "pygetwindow not installed."
+            windows = gw.getWindowsWithTitle(title)
+            if windows:
+                win = windows[0]
+                try:
+                    win.restore()
+                    win.activate()
+                except Exception:
+                    pass
+                return f"Focused window: {win.title}"
+            return f"Window containing '{title}' not found."
+        return await loop.run_in_executor(None, _focus)
+
+    async def _tool_system_info(self, params: dict):
+        metric = params.get("metric", "").lower()
+        loop = asyncio.get_event_loop()
+        def _info():
+            try:
+                import psutil
+            except ImportError:
+                return "psutil not installed."
+            if "cpu" in metric:
+                return f"CPU usage: {psutil.cpu_percent(interval=1)}%"
+            elif "ram" in metric or "memory" in metric:
+                vm = psutil.virtual_memory()
+                return f"RAM usage: {vm.percent}% ({vm.used / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB)"
+            elif "disk" in metric:
+                disk = psutil.disk_usage('/')
+                return f"Disk usage: {disk.percent}% ({disk.free / (1024**3):.1f}GB free)"
+            elif "battery" in metric:
+                if hasattr(psutil, "sensors_battery") and psutil.sensors_battery():
+                    batt = psutil.sensors_battery()
+                    return f"Battery: {batt.percent}% (Plugged in: {batt.power_plugged})"
+                return "Battery info not available."
+            return f"Unsupported metric: {metric}. Try cpu, ram, disk, or battery."
+        return await loop.run_in_executor(None, _info)
 
     # ── TTS / Notifications ───────────────────────────────────────────────────
 
